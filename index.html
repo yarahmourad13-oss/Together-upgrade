@@ -211,6 +211,11 @@ input[type=checkbox]{width:18px;height:18px;accent-color:var(--amber)}
 .stat .v{font-family:'Fraunces',Georgia,serif;font-weight:600;font-size:18px;line-height:1.2;margin-top:2px;word-break:break-word}
 .catrow{margin-bottom:14px}
 .catrow:last-child{margin-bottom:0}
+
+.sheet-back{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center}
+.sheet{background:var(--surface);border:1px solid var(--line);border-radius:18px 18px 0 0;width:100%;max-width:640px;max-height:84vh;overflow:auto;padding:16px 16px calc(20px + env(safe-area-inset-bottom,0px))}
+.res{display:block;width:100%;text-align:left;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--surface-2);margin-top:6px;font-weight:500}
+.res small{display:block;color:var(--dim);font-weight:400;font-size:12.5px;margin-top:1px}
 </style>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
@@ -240,24 +245,18 @@ input[type=checkbox]{width:18px;height:18px;accent-color:var(--amber)}
 
       <section class="sec" id="sec-meals">
         <div class="topseg" id="ml-sub"></div>
-        <div id="ml-week"></div>
+        <div id="ml-log"></div>
+        <div id="ml-week" hidden></div>
         <div id="ml-recipes" hidden>
           <button class="btn ghost" id="addRecipeBtn" style="margin-top:0;margin-bottom:10px">+ Add a recipe</button>
+          <div id="recipeFilter"></div>
           <input type="text" id="recipeSearch" placeholder="Search recipes by name" style="margin-bottom:12px">
           <div class="card" id="newRecipeForm" hidden>
             <h3 id="rFormTitle">New recipe</h3>
             <label class="field" for="rName">Recipe name</label>
             <input type="text" id="rName" placeholder="e.g. Chicken and rice bowl">
-            <label class="field" for="rLink">Recipe link to auto-fill</label>
-            <input type="text" id="rLink" placeholder="https://...">
-            <button class="btn ghost" id="fetchRecipeBtn" type="button">Fetch and fill from link</button>
-            <p class="muted small" id="fetchStatus"></p>
-            <label class="field" for="rPasteText">Or paste an ingredient list (from a screenshot, DM, or caption)</label>
-            <textarea id="rPasteText" rows="5" placeholder="2 thick slices sourdough bread&#10;1 ripe avocado&#10;150-200 g halloumi cheese&#10;½ lemon"></textarea>
-            <button class="btn ghost" id="parseTextBtn" type="button">Parse this text</button>
-            <p class="muted small" id="parseTextStatus"></p>
             <label class="field" for="rType">Meal type</label>
-            <select id="rType"><option value="breakfast">Breakfast</option><option value="lunch">Lunch</option><option value="dinner">Dinner</option><option value="snack">Snack</option></select>
+            <select id="rType"></select>
             <label class="field" for="rServings">Base servings</label>
             <input type="number" id="rServings" value="1" min="1">
             <label class="field">Ingredients. Change the food in any row and its grams adjust to keep that ingredient's protein, carbs, or fat the same.</label>
@@ -354,6 +353,15 @@ function toast(msg){
   const t = document.createElement('div'); t.className = 'toast'; t.textContent = msg; t.setAttribute('role', 'status');
   document.body.appendChild(t); setTimeout(() => t.remove(), 2600);
 }
+let ARM = null;
+/* two-tap confirmation that works everywhere (browser confirm() dialogs are blocked in some phone browsers) */
+function sure(key, msg){
+  const n = Date.now();
+  if(ARM && ARM.k === key && n - ARM.t < 4000){ ARM = null; return true; }
+  ARM = {k: key, t: n};
+  toast(msg + ' Tap again to confirm.');
+  return false;
+}
 function seg(act, items, cur){
   return '<div class="seg" role="group">' + items.map(a => '<button type="button" data-act="' + act + '" data-v="' + esc(a[0]) + '" aria-pressed="' + (String(a[0]) === String(cur)) + '">' + esc(a[1]) + '</button>').join('') + '</div>';
 }
@@ -428,7 +436,7 @@ let P = null;
 let S = {};
 const UI = {
   wk: {sub:'session', day:0, date:null, filter:''},
-  ml: {sub:'week', day:0, view:'day', tg:false},
+  ml: {sub:'log', date:null, tg:false, add:null, pick:null, rf:'all'},
   rt: {view:'day', cur:null, edit:null},
   mn: {sub:'overview', cyc:null, type:'expense'}
 };
@@ -441,11 +449,17 @@ const SECTIONS = [
 let sec = 'workouts';
 const RENDER = {};
 
-const ACT = {}, CHG = {};
+const ACT = {}, CHG = {}, INP = {};
 document.addEventListener('click', e => {
   const el = e.target.closest('[data-act]');
   if(!el) return;
   const f = ACT[el.dataset.act];
+  if(f) f(el, e);
+});
+document.addEventListener('input', e => {
+  const el = e.target.closest('[data-inp]');
+  if(!el) return;
+  const f = INP[el.dataset.inp];
   if(f) f(el, e);
 });
 document.addEventListener('change', e => {
@@ -498,7 +512,7 @@ async function enterProfile(p){
   S.moneyset = Object.assign(defMoneySet(), ms);
   RT.cache = {}; RT.ver++;
   UI.wk = {sub:'session', day:0, date:null, filter:''};
-  UI.ml = {sub:'week', day:0, view:'day', tg:false};
+  UI.ml = {sub:'log', date:null, tg:false, add:newAdd(), pick:null, rf:'all'};
   UI.rt = {view:'day', cur:null, edit:null};
   UI.mn = {sub:'overview', cyc:null, type:'expense'};
   try{ await loadCycle(cycStartOf(todayKey())); }catch(e){}
@@ -933,14 +947,22 @@ ACT['wk-del'] = el => {
 RENDER.workouts = renderWorkouts;
 
 /* =====================================================================
-   MEALS — shared recipe library, personal weekly plan, groceries
+   MEALS — food log + macro lookup, weekly table, recipes, groceries
    ===================================================================== */
 let recipes = [];
 const WEEKDAYS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 const SLOTS = ['Breakfast','Lunch','Dinner','Snack'];
+const SLOT_TYPE = {Breakfast:'breakfast', Lunch:'lunch', Dinner:'dinner', Snack:'snack'};
+const TYPES = [['breakfast','Breakfast'],['lunch','Lunch'],['dinner','Dinner'],['snack','Snack'],['drink','Drinks'],['sandwich','Sandwiches'],['dessert','Desserts']];
+const TYPE_LABEL = {};
+TYPES.forEach(t => { TYPE_LABEL[t[0]] = t[1]; });
+/* typical weight of one piece, used when you log "2 eggs" (you can change it per entry) */
+const PIECE_G = {'Eggs, whole, cooked':50, 'Egg whites':33, 'Baladi bread (Egyptian flatbread)':90, 'Pita bread':60, 'Banana':118, 'Apple':180, 'Oranges':130, 'Avocado':150, 'White bread':30, 'Whole wheat bread':30, 'Sourdough bread':40, 'Tortilla, flour':45, 'Dates':8, 'Rice cakes':9, 'Whey protein powder':30};
 
-function defMeals(){ return {plan:{}, prev:null, checked:{}, targets:null}; }
+function defMeals(){ return {plan:{}, prev:null, checked:{}, targets:null, log:{}, custom:[]}; }
+function newAdd(){ return {mode:'food', q:'', key:'', unit:'g', qty:'', pw:'', rq:'', rkey:'', srv:'1', custom:false}; }
 function mealTargets(){ return S.meals.targets || PROFILES[P].targets; }
+function n1(x){ return x < 10 ? (Math.round(x * 10) / 10).toString() : Math.round(x).toString(); }
 
 function recipeMacros(recipe){
   let cal = 0, p = 0, c = 0, f = 0;
@@ -952,41 +974,27 @@ function recipeMacros(recipe){
   });
   return {cal, p, c, f};
 }
-function slotGrams(recipe, slot, idx){
-  const sw = slot.swaps && slot.swaps[idx];
-  const factor = (slot.servings || 0) / (recipe.servings || 1);
-  return (sw ? sw.g : recipe.ingredients[idx].grams) * factor;
-}
-function slotFood(recipe, slot, idx){
-  const sw = slot.swaps && slot.swaps[idx];
-  return sw ? findFood(sw.key) : ingredientFood(recipe.ingredients[idx]);
-}
 function slotMacros(recipe, slot){
-  let cal = 0, p = 0, c = 0, f = 0;
-  recipe.ingredients.forEach((ing, idx) => {
-    const food = slotFood(recipe, slot, idx);
-    if(!food) return;
-    const r = slotGrams(recipe, slot, idx) / 100;
-    cal += food.cal * r; p += food.p * r; c += food.c * r; f += food.f * r;
-  });
-  return {cal, p, c, f};
+  const m = recipeMacros(recipe), k = (slot.servings || 0) / (recipe.servings || 1);
+  return {cal: m.cal * k, p: m.p * k, c: m.c * k, f: m.f * k};
 }
+function slotGrams(recipe, slot, idx){ return recipe.ingredients[idx].grams * (slot.servings || 0) / (recipe.servings || 1); }
 function suggestServings(recipe){
-  const m = recipeMacros(recipe), per = recipe.servings || 1, calPer = m.cal / per;
+  const m = recipeMacros(recipe), calPer = m.cal / (recipe.servings || 1);
   if(calPer <= 0) return 1;
-  let s = Math.round((mealTargets().cal / 4 / calPer) * 2) / 2;
+  const s = Math.round((mealTargets().cal / 4 / calPer) * 2) / 2;
   return s < 0.5 ? 0.5 : s;
 }
-function applySwap(recipe, slot, idx, newKey){
-  const ing = recipe.ingredients[idx], origFood = ingredientFood(ing);
-  const cat = ing.key === '__custom__' ? null : ing.key.split('::')[0];
-  const mk2 = cat === 'protein' ? 'p' : cat === 'carb' ? 'c' : cat === 'fat' ? 'f' : 'cal';
-  const nf = findFood(newKey);
-  if(!origFood || !nf) return;
-  const amt = (origFood[mk2] || 0) * ing.grams / 100;
-  const g = nf[mk2] > 0 ? Math.max(1, Math.round(amt / nf[mk2] * 100)) : ing.grams;
-  if(!slot.swaps) slot.swaps = {};
-  slot.swaps[idx] = {key: newKey, g: g};
+function weekDate(dayIdx){ return addDays(mondayOf(todayKey()), dayIdx); }
+function isEaten(a){ return !!(a && a.eaten && (S.meals.log[a.eaten.date] || []).some(e => e.id === a.eaten.id)); }
+function unlogEaten(a){
+  if(!a || !a.eaten) return;
+  const dt = a.eaten.date;
+  if(S.meals.log[dt]){
+    S.meals.log[dt] = S.meals.log[dt].filter(e => e.id !== a.eaten.id);
+    if(!S.meals.log[dt].length) delete S.meals.log[dt];
+  }
+  delete a.eaten;
 }
 function dayTotals(d){
   let cal = 0, p = 0, c = 0, f = 0;
@@ -1000,136 +1008,297 @@ function dayTotals(d){
   });
   return {cal, p, c, f};
 }
-function pctDelta(target, val){ if(!target) return '–'; const pc = (val - target) / target * 100; return (pc > 0 ? '+' : '') + pc.toFixed(0) + '%'; }
 function deltaClass(target, val){ if(!target) return 'good'; const pc = Math.abs(val - target) / target * 100; return pc <= 8 ? 'good' : pc <= 20 ? 'mid' : 'bad'; }
+function progTone(target, val){ const r = target ? val / target : 0; return r > 1.08 ? 'bad' : r >= 0.92 ? 'good' : ''; }
 
 function renderMeals(){
   const ui = UI.ml;
-  $('#ml-sub').innerHTML = seg('ml-sub', [['week', 'Weekly plan'], ['recipes', 'Recipes'], ['groceries', 'Groceries']], ui.sub);
+  $('#ml-sub').innerHTML = seg('ml-sub', [['log', 'Log'], ['week', 'Week'], ['recipes', 'Recipes'], ['groceries', 'Groceries']], ui.sub);
+  $('#ml-log').hidden = ui.sub !== 'log';
   $('#ml-week').hidden = ui.sub !== 'week';
   $('#ml-recipes').hidden = ui.sub !== 'recipes';
   $('#ml-groc').hidden = ui.sub !== 'groceries';
-  if(ui.sub === 'week') renderMealWeek();
+  if(ui.sub === 'log') renderMealLog();
+  else if(ui.sub === 'week') renderMealWeek();
   else if(ui.sub === 'recipes') renderRecipeList();
   else renderGroceries();
 }
 RENDER.meals = renderMeals;
 ACT['ml-sub'] = el => { UI.ml.sub = el.dataset.v; renderMeals(); };
-ACT['ml-view'] = el => { UI.ml.view = el.dataset.v; renderMealWeek(); };
-ACT['ml-day'] = el => { UI.ml.day = +el.dataset.v; renderMealWeek(); };
-ACT['ml-goto'] = el => { UI.ml.day = +el.dataset.day; UI.ml.view = 'day'; renderMealWeek(); window.scrollTo(0, 0); };
-ACT['ml-tg'] = () => { UI.ml.tg = !UI.ml.tg; renderMealWeek(); };
+ACT['ml-tg'] = () => { UI.ml.tg = !UI.ml.tg; renderMeals(); };
 CHG['ml-target'] = el => {
   const t = Object.assign({}, mealTargets());
   t[el.dataset.f] = Math.max(0, parseFloat(el.value) || 0);
-  S.meals.targets = t; saveDoc('meals', S.meals); renderMealWeek();
+  S.meals.targets = t; saveDoc('meals', S.meals); renderMeals();
 };
+function targetsCard(){
+  const t = mealTargets();
+  const f = (k, l) => '<div><label class="field">' + l + '</label><input type="number" inputmode="numeric" value="' + t[k] + '" data-chg="ml-target" data-f="' + k + '"></div>';
+  return '<div class="card"><h3>Daily targets</h3><div class="row2">' + f('cal', 'Calories') + f('p', 'Protein (g)') + '</div><div class="row2">' + f('c', 'Carbs (g)') + f('f', 'Fat (g)') + '</div></div>';
+}
+
+/* ---------- food search helpers ---------- */
+function allSearchFoods(){
+  return (S.meals.custom || []).map(c => ({key:'my::' + c.n, n:c.n, cal:c.cal, p:c.p, c:c.c, f:c.f, mine:true})).concat(allFoodsFlat());
+}
+function searchFoods(q){
+  const w = q.toLowerCase().split(/\s+/).filter(Boolean);
+  if(!w.length) return [];
+  return allSearchFoods().filter(f => { const n = f.n.toLowerCase(); return w.every(x => n.indexOf(x) >= 0); }).slice(0, 8);
+}
+function foodFromKey(k){
+  if(k && k.indexOf('my::') === 0){
+    const n = k.slice(4), c = (S.meals.custom || []).find(x => x.n === n);
+    return c ? {key:k, n:c.n, cal:c.cal, p:c.p, c:c.c, f:c.f} : null;
+  }
+  return findFood(k);
+}
+function searchRecipes(q, type){
+  const w = q.toLowerCase().split(/\s+/).filter(Boolean);
+  return recipes.filter(r => (type === 'all' || !type || r.type === type) && w.every(x => r.name.toLowerCase().indexOf(x) >= 0)).sort((a, b) => a.name.localeCompare(b.name));
+}
+function addCalc(){
+  const a = UI.ml.add;
+  if(a.mode === 'food'){
+    const f = foodFromKey(a.key), q = parseFloat(a.qty);
+    if(!f || !(q > 0)) return null;
+    let g = q, desc = q + ' g';
+    if(a.unit === 'piece'){
+      const pw = parseFloat(a.pw);
+      if(!(pw > 0)) return null;
+      g = q * pw; desc = q + ' × ' + pw + ' g';
+    }
+    const r = g / 100;
+    return {name:f.n, desc:desc, cal:f.cal * r, p:f.p * r, c:f.c * r, f:f.f * r};
+  }
+  const rec = recipes.find(x => x.id === a.rkey), s = parseFloat(a.srv);
+  if(!rec || !(s > 0)) return null;
+  const m = recipeMacros(rec), k = s / (rec.servings || 1);
+  return {name:rec.name, desc:s + (s === 1 ? ' serving' : ' servings'), cal:m.cal * k, p:m.p * k, c:m.c * k, f:m.f * k};
+}
+function macroLine(c){
+  return '<b>' + Math.round(c.cal) + '</b> cal · P <b>' + n1(c.p) + '</b> g · C <b>' + n1(c.c) + '</b> g · F <b>' + n1(c.f) + '</b> g';
+}
+function updatePreview(){
+  const el = $('#mlPrev');
+  if(!el) return;
+  const c = addCalc();
+  el.innerHTML = c ? macroLine(c) : '<span class="muted">Enter an amount to see the macros.</span>';
+}
+function updateResults(){
+  const el = $('#mlRes');
+  if(!el) return;
+  const a = UI.ml.add;
+  if(a.mode === 'food'){
+    const rs = searchFoods(a.q);
+    el.innerHTML = !a.q.trim() ? '' : !rs.length ? '<div class="muted small" style="margin-top:8px">No match. Try another word, or add it as your own food below.</div>' :
+      rs.map(f => '<button type="button" class="res" data-act="ml-pick" data-key="' + esc(f.key) + '">' + esc(f.n) + (f.mine ? ' <span class="muted small">(yours)</span>' : '') + '<small class="num">' + Math.round(f.cal) + ' cal · P ' + n1(f.p) + ' · C ' + n1(f.c) + ' · F ' + n1(f.f) + ' per 100 g</small></button>').join('');
+  }else{
+    const rs = searchRecipes(a.rq, 'all').slice(0, 8);
+    el.innerHTML = !recipes.length ? '<div class="muted small" style="margin-top:8px">No recipes saved yet.</div>' : !rs.length ? '<div class="muted small" style="margin-top:8px">No recipe with that name.</div>' :
+      rs.map(r => { const m = recipeMacros(r), per = r.servings || 1; return '<button type="button" class="res" data-act="ml-rpick" data-id="' + esc(r.id) + '">' + esc(r.name) + '<small class="num">' + esc(TYPE_LABEL[r.type] || r.type) + ' · ' + Math.round(m.cal / per) + ' cal per serving</small></button>'; }).join('');
+  }
+}
+INP['ml-q'] = el => { UI.ml.add.q = el.value; updateResults(); };
+INP['ml-rq'] = el => { UI.ml.add.rq = el.value; updateResults(); };
+INP['ml-qty'] = el => { UI.ml.add.qty = el.value; updatePreview(); };
+INP['ml-pw'] = el => { UI.ml.add.pw = el.value; updatePreview(); };
+INP['ml-srv'] = el => { UI.ml.add.srv = el.value; updatePreview(); };
+CHG['ml-unit'] = el => { UI.ml.add.unit = el.value; renderMealLog(); };
+ACT['ml-addmode'] = el => { const a = UI.ml.add; a.mode = el.dataset.v; a.custom = false; renderMealLog(); };
+ACT['ml-pick'] = el => {
+  const a = UI.ml.add, f = foodFromKey(el.dataset.key);
+  if(!f) return;
+  a.key = f.key; a.unit = 'g'; a.qty = ''; a.pw = PIECE_G[f.n] ? String(PIECE_G[f.n]) : '';
+  renderMealLog();
+};
+ACT['ml-unpick'] = () => { const a = UI.ml.add; a.key = ''; a.rkey = ''; a.qty = ''; renderMealLog(); };
+ACT['ml-rpick'] = el => { const a = UI.ml.add; a.rkey = el.dataset.id; a.srv = '1'; renderMealLog(); };
+ACT['ml-custom-open'] = () => { UI.ml.add.custom = !UI.ml.add.custom; renderMealLog(); };
+ACT['ml-custom-save'] = () => {
+  const n = $('#cName').value.trim(), num = id => Math.max(0, parseFloat($('#' + id).value) || 0);
+  if(!n){ toast('Give the food a name'); return; }
+  const item = {n:n, cal:num('cCal'), p:num('cP'), c:num('cC'), f:num('cF')};
+  S.meals.custom = (S.meals.custom || []).filter(x => x.n.toLowerCase() !== n.toLowerCase());
+  S.meals.custom.push(item);
+  saveDoc('meals', S.meals);
+  const a = UI.ml.add;
+  a.mode = 'food'; a.key = 'my::' + n; a.unit = 'g'; a.qty = ''; a.pw = ''; a.custom = false;
+  renderMealLog();
+};
+ACT['ml-add'] = () => {
+  const c = addCalc();
+  if(!c){ toast('Enter an amount first'); return; }
+  const date = UI.ml.date;
+  (S.meals.log[date] || (S.meals.log[date] = [])).push({id:'e' + Date.now(), name:c.name, desc:c.desc, cal:Math.round(c.cal * 10) / 10, p:Math.round(c.p * 10) / 10, c:Math.round(c.c * 10) / 10, f:Math.round(c.f * 10) / 10});
+  saveDoc('meals', S.meals);
+  const a = UI.ml.add, mode = a.mode;
+  UI.ml.add = newAdd(); UI.ml.add.mode = mode;
+  toast('Added to ' + (date === todayKey() ? 'today' : shortDate(date)));
+  renderMealLog();
+};
+ACT['ml-clear'] = () => { const mode = UI.ml.add.mode; UI.ml.add = newAdd(); UI.ml.add.mode = mode; renderMealLog(); };
+ACT['ml-del'] = el => {
+  const date = UI.ml.date;
+  S.meals.log[date] = (S.meals.log[date] || []).filter(e => e.id !== el.dataset.id);
+  if(!S.meals.log[date].length) delete S.meals.log[date];
+  saveDoc('meals', S.meals); renderMealLog();
+};
+ACT['ml-dprev'] = () => { UI.ml.date = addDays(UI.ml.date, -1); renderMealLog(); };
+ACT['ml-dnext'] = () => { UI.ml.date = addDays(UI.ml.date, 1); renderMealLog(); };
+ACT['ml-dtoday'] = () => { UI.ml.date = todayKey(); renderMealLog(); };
+
+function renderMealLog(){
+  const ui = UI.ml;
+  if(!ui.date) ui.date = todayKey();
+  const date = ui.date, entries = S.meals.log[date] || [], t = mealTargets();
+  const tot = {cal:0, p:0, c:0, f:0};
+  entries.forEach(e => { tot.cal += e.cal; tot.p += e.p; tot.c += e.c; tot.f += e.f; });
+  const isToday = date === todayKey(), q = parse(date);
+  let h = '<div class="navrow"><button class="iconbtn" data-act="ml-dprev" aria-label="Previous day"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button><div class="ttl">' + (isToday ? 'Today' : DOW[dow(date)] + ', ' + q.d + ' ' + MONTHS[q.m - 1].slice(0, 3)) + '</div>' +
+    '<button class="iconbtn" data-act="ml-dnext" aria-label="Next day"><svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></button>' + (isToday ? '' : '<button class="sm" data-act="ml-dtoday" style="height:42px">Today</button>') + '</div>';
+  h += '<div style="margin-bottom:12px"><button class="sm" data-act="ml-tg">' + (ui.tg ? 'Hide targets' : 'Edit daily targets') + '</button></div>';
+  if(ui.tg) h += targetsCard();
+
+  const left = t.cal - tot.cal;
+  h += '<div class="card"><div class="lbl-row"><span class="num"><b>' + Math.round(tot.cal) + '</b> / ' + t.cal + ' cal</span><span class="num ' + (left < 0 ? 'bad' : 'muted') + '">' + (left >= 0 ? Math.round(left) + ' left' : Math.round(-left) + ' over') + '</span></div>' +
+    '<div class="bar"><i class="' + progTone(t.cal, tot.cal) + '" style="width:' + Math.min(100, tot.cal / t.cal * 100) + '%"></i></div>';
+  [['Protein', 'p'], ['Carbs', 'c'], ['Fat', 'f']].forEach(m => {
+    const v = tot[m[1]], tg = t[m[1]];
+    h += '<div style="margin-top:12px"><div class="lbl-row" style="margin-bottom:5px"><span>' + m[0] + '</span><span class="num muted">' + n1(v) + ' / ' + tg + ' g</span></div><div class="bar"><i class="' + progTone(tg, v) + '" style="width:' + Math.min(100, tg ? v / tg * 100 : 0) + '%"></i></div></div>';
+  });
+  h += '</div>';
+
+  h += '<div class="card"><h3>' + (isToday ? 'What I ate today' : 'What I ate') + '</h3>';
+  if(!entries.length) h += '<div class="empty">Nothing logged yet. Search a food below and add it.</div>';
+  entries.forEach(e => {
+    h += '<div class="list-row"><div style="min-width:0"><div>' + esc(e.name) + ' <span class="muted small">· ' + esc(e.desc) + '</span></div><div class="muted small num">' + Math.round(e.cal) + ' cal · P ' + n1(e.p) + ' · C ' + n1(e.c) + ' · F ' + n1(e.f) + '</div></div><button class="danger" data-act="ml-del" data-id="' + esc(e.id) + '" aria-label="Remove ' + esc(e.name) + '">✕</button></div>';
+  });
+  h += '</div>';
+  h += mlAddCard();
+  $('#ml-log').innerHTML = h;
+  updateResults(); updatePreview();
+}
+
+function mlAddCard(){
+  const a = UI.ml.add;
+  let h = '<div class="card"><h3>Add food or look up macros</h3><p class="muted small" style="margin-top:0">Search any food to see its calories and macros. Add it to your log, or just check it and clear.</p>' +
+    seg('ml-addmode', [['food', 'Food'], ['recipe', 'My recipe']], a.mode);
+  if(a.mode === 'food'){
+    const f = a.key ? foodFromKey(a.key) : null;
+    if(!f){
+      h += '<input type="text" id="mlQ" style="margin-top:10px" placeholder="e.g. eggs, cottage cheese, baladi" value="' + esc(a.q) + '" data-inp="ml-q" aria-label="Search foods" autocomplete="off"><div id="mlRes"></div>' +
+        '<button class="sm" style="margin-top:12px" data-act="ml-custom-open">' + (a.custom ? 'Close' : 'Not listed? Add your own food') + '</button>';
+      if(a.custom){
+        h += '<div style="margin-top:10px"><label class="field" for="cName">Food name</label><input type="text" id="cName" maxlength="60"><p class="muted small">Enter the values for 100 g.</p><div class="row2"><div><label class="field" for="cCal">Calories</label><input type="number" id="cCal" inputmode="decimal"></div><div><label class="field" for="cP">Protein</label><input type="number" id="cP" inputmode="decimal"></div></div>' +
+          '<div class="row2"><div><label class="field" for="cC">Carbs</label><input type="number" id="cC" inputmode="decimal"></div><div><label class="field" for="cF">Fat</label><input type="number" id="cF" inputmode="decimal"></div></div><button class="btn sage" data-act="ml-custom-save">Save food</button></div>';
+      }
+    }else{
+      h += '<div class="lbl-row" style="margin-top:12px"><b>' + esc(f.n) + '</b><button class="sm" data-act="ml-unpick">Change</button></div><div class="muted small num">Per 100 g: ' + Math.round(f.cal) + ' cal · P ' + n1(f.p) + ' · C ' + n1(f.c) + ' · F ' + n1(f.f) + '</div>' +
+        '<div class="row2"><div><label class="field" for="mlQty">Amount</label><input type="number" id="mlQty" inputmode="decimal" min="0" step="any" value="' + esc(a.qty) + '" data-inp="ml-qty"></div>' +
+        '<div><label class="field" for="mlUnit">Unit</label><select id="mlUnit" data-chg="ml-unit"><option value="g"' + (a.unit === 'g' ? ' selected' : '') + '>grams</option><option value="piece"' + (a.unit === 'piece' ? ' selected' : '') + '>pieces</option></select></div></div>';
+      if(a.unit === 'piece') h += '<label class="field" for="mlPw">Weight of one piece (g)</label><input type="number" id="mlPw" inputmode="decimal" min="0" step="any" value="' + esc(a.pw) + '" data-inp="ml-pw">' + (a.pw ? '' : '<p class="muted small">Enter roughly how much one piece weighs.</p>');
+    }
+  }else{
+    const r = a.rkey ? recipes.find(x => x.id === a.rkey) : null;
+    if(!r){
+      h += '<input type="text" style="margin-top:10px" placeholder="Search your recipes" value="' + esc(a.rq) + '" data-inp="ml-rq" aria-label="Search recipes" autocomplete="off"><div id="mlRes"></div>';
+    }else{
+      h += '<div class="lbl-row" style="margin-top:12px"><b>' + esc(r.name) + '</b><button class="sm" data-act="ml-unpick">Change</button></div>' +
+        '<label class="field" for="mlSrv">Servings eaten</label><input type="number" id="mlSrv" inputmode="decimal" min="0" step="0.5" value="' + esc(a.srv) + '" data-inp="ml-srv">';
+    }
+  }
+  const ready = a.mode === 'food' ? !!a.key : !!a.rkey;
+  if(ready){
+    h += '<div class="stat" style="margin-top:12px"><div class="k">Macros for this amount</div><div id="mlPrev" class="num" style="margin-top:4px"></div></div>' +
+      '<button class="btn" data-act="ml-add">Add to ' + (UI.ml.date === todayKey() ? 'today' : 'this day') + '</button><button class="btn ghost" data-act="ml-clear">Clear</button>';
+  }
+  return h + '</div>';
+}
+
+/* ---------- weekly table + recipe picker ---------- */
 ACT['ml-repeat'] = () => {
   if(!S.meals.prev){ toast('No saved week yet. Use "Start new week" after filling one in.'); return; }
   S.meals.plan = JSON.parse(JSON.stringify(S.meals.prev));
+  Object.keys(S.meals.plan).forEach(k => { delete S.meals.plan[k].eaten; });
   saveDoc('meals', S.meals); renderMealWeek();
 };
 ACT['ml-new'] = () => {
-  if(!confirm('Save this week as "last week" and start a fresh, empty week?')) return;
+  if(!sure('ml-new', 'Start a fresh week?')) return;
   S.meals.prev = JSON.parse(JSON.stringify(S.meals.plan));
   S.meals.plan = {}; S.meals.checked = {};
   saveDoc('meals', S.meals); renderMealWeek();
 };
-CHG['ml-recipe'] = el => {
-  const key = el.dataset.key;
-  if(!el.value){ delete S.meals.plan[key]; }
-  else{
-    const r = recipes.find(x => x.id === el.value);
-    S.meals.plan[key] = {recipeId: el.value, servings: r ? suggestServings(r) : 1};
-  }
-  saveDoc('meals', S.meals); renderMealWeek();
-};
-ACT['ml-step'] = el => {
-  const a = S.meals.plan[el.dataset.key];
-  if(!a) return;
-  a.servings = Math.max(0, (a.servings || 0) + parseFloat(el.dataset.dir) * 0.5);
-  saveDoc('meals', S.meals); renderMealWeek();
-};
-CHG['ml-swap'] = el => {
-  if(!el.value) return;
-  const a = S.meals.plan[el.dataset.key];
-  const r = a && recipes.find(x => x.id === a.recipeId);
-  if(!r) return;
-  applySwap(r, a, parseInt(el.dataset.idx, 10), el.value);
-  saveDoc('meals', S.meals); renderMealWeek();
-};
-ACT['ml-revert'] = el => {
-  const a = S.meals.plan[el.dataset.key];
-  if(a && a.swaps) delete a.swaps[el.dataset.idx];
-  saveDoc('meals', S.meals); renderMealWeek();
-};
-
 function renderMealWeek(){
   const ui = UI.ml, t = mealTargets();
-  let h = '<div class="topseg">' + seg('ml-view', [['day', 'Day'], ['table', 'Week table']], ui.view) + '</div>';
-  h += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px"><button class="sm" data-act="ml-repeat">Repeat last week</button><button class="sm" data-act="ml-new">Start new week</button><button class="sm" data-act="ml-tg">' + (ui.tg ? 'Hide targets' : 'Edit daily targets') + '</button></div>';
-  if(ui.tg){
-    h += '<div class="card"><h3>Daily targets</h3><div class="row2">' +
-      [['cal', 'Calories'], ['p', 'Protein g']].map(a => '<div><label class="field">' + a[1] + '</label><input type="number" inputmode="numeric" value="' + t[a[0]] + '" data-chg="ml-target" data-f="' + a[0] + '"></div>').join('') + '</div><div class="row2">' +
-      [['c', 'Carbs g'], ['f', 'Fat g']].map(a => '<div><label class="field">' + a[1] + '</label><input type="number" inputmode="numeric" value="' + t[a[0]] + '" data-chg="ml-target" data-f="' + a[0] + '"></div>').join('') + '</div></div>';
-  }
-  h += ui.view === 'table' ? mlTable() : mlDay();
-  $('#ml-week').innerHTML = h;
-}
-
-function mlTable(){
-  const t = mealTargets();
-  let h = '<div class="card"><h3>This week</h3><div class="scroll-x"><table class="tbl"><thead><tr><th>Day</th>' + SLOTS.map(s => '<th>' + s + '</th>').join('') + '<th class="r">Total</th></tr></thead><tbody>';
+  let h = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px"><button class="sm" data-act="ml-repeat">Repeat last week</button><button class="sm" data-act="ml-new">Start new week</button><button class="sm" data-act="ml-tg">' + (ui.tg ? 'Hide targets' : 'Edit daily targets') + '</button></div>';
+  if(ui.tg) h += targetsCard();
+  h += '<div class="card"><h3>This week</h3><div class="scroll-x"><table class="tbl"><thead><tr><th>Day</th>' + SLOTS.map(s => '<th>' + s + '</th>').join('') + '<th class="r">Total</th></tr></thead><tbody>';
   let sum = 0, cnt = 0;
   WEEKDAYS.forEach((d, i) => {
     const tot = dayTotals(i);
     h += '<tr><td><b>' + d + '</b></td>' + SLOTS.map(s => {
       const a = S.meals.plan[i + '-' + s], r = a && a.recipeId && recipes.find(x => x.id === a.recipeId);
-      if(!r) return '<td><button class="cellbtn muted" data-act="ml-goto" data-day="' + i + '">+ Add</button></td>';
+      if(!r) return '<td><button class="cellbtn muted" data-act="ml-cell" data-day="' + i + '" data-slot="' + s + '">+ Add</button></td>';
       const m = slotMacros(r, a);
-      return '<td><button class="cellbtn" data-act="ml-goto" data-day="' + i + '">' + esc(r.name) + '<small>' + Math.round(m.cal) + ' cal</small></button></td>';
+      return '<td><button class="cellbtn" data-act="ml-cell" data-day="' + i + '" data-slot="' + s + '">' + esc(r.name) + '<small>' + (isEaten(a) ? '✓ eaten · ' : '') + Math.round(m.cal) + ' cal · ' + a.servings + '×</small></button></td>';
     }).join('') + '<td class="r num ' + (tot.cal ? deltaClass(t.cal, tot.cal) : 'muted') + '">' + (tot.cal ? Math.round(tot.cal) : '–') + '</td></tr>';
     if(tot.cal){ sum += tot.cal; cnt++; }
   });
-  h += '</tbody></table></div><p class="muted small" style="margin-bottom:0">Tap any cell to edit that day. Target ' + t.cal + ' cal a day' + (cnt ? '; planned days average ' + Math.round(sum / cnt) + ' cal.' : '.') + '</p></div>';
-  return h;
+  h += '</tbody></table></div><p class="muted small" style="margin-bottom:0">Tap a cell to pick a recipe. Target ' + t.cal + ' cal a day' + (cnt ? '; planned days average ' + Math.round(sum / cnt) + ' cal.' : '.') + '</p></div>';
+  if(ui.pick) h += pickSheet();
+  $('#ml-week').innerHTML = h;
+  if(ui.pick) updatePickList();
 }
-
-function mlDay(){
-  const ui = UI.ml, t = mealTargets(), d = ui.day, tot = dayTotals(d);
-  const pct = Math.min(100, Math.max(0, tot.cal / t.cal * 100));
-  let h = tabs('ml-day', WEEKDAYS.map((w, i) => [i, w]), d);
-  h += '<div class="card"><div class="lbl-row"><span class="num">' + Math.round(tot.cal) + ' / ' + t.cal + ' cal</span><span class="' + deltaClass(t.cal, tot.cal) + '">' + pctDelta(t.cal, tot.cal) + '</span></div>' +
-    '<div class="bar"><i class="' + deltaClass(t.cal, tot.cal) + '" style="width:' + pct + '%"></i></div>' +
-    '<div class="muted small num" style="margin-top:6px">Protein ' + tot.p.toFixed(0) + '/' + t.p + ' g · Carbs ' + tot.c.toFixed(0) + '/' + t.c + ' g · Fat ' + tot.f.toFixed(0) + '/' + t.f + ' g</div></div>';
-  const sorted = recipes.slice().sort((a, b) => a.name.localeCompare(b.name));
-  SLOTS.forEach(slot => {
-    const key = d + '-' + slot, a = S.meals.plan[key];
-    const mine = sorted.filter(r => r.type === slot.toLowerCase()), others = sorted.filter(r => r.type !== slot.toLowerCase());
-    const opt = r => '<option value="' + esc(r.id) + '"' + (a && r.id === a.recipeId ? ' selected' : '') + '>' + esc(r.name) + '</option>';
-    let sel = '<option value="">Choose a recipe</option>';
-    if(mine.length) sel += '<optgroup label="' + slot + ' recipes">' + mine.map(opt).join('') + '</optgroup>';
-    if(others.length) sel += '<optgroup label="Other recipes">' + others.map(opt).join('') + '</optgroup>';
-    h += '<div class="slot"><div class="slot-label">' + slot + '</div><select data-chg="ml-recipe" data-key="' + key + '" aria-label="' + slot + ' recipe">' + sel + '</select>';
-    const r = a && a.recipeId && recipes.find(x => x.id === a.recipeId);
-    if(r){
-      const m = slotMacros(r, a);
-      h += '<div class="stepper"><span class="muted">Servings</span><div class="ctl"><button data-act="ml-step" data-key="' + key + '" data-dir="-1" aria-label="Fewer servings">−</button><span class="v num">' + a.servings + '</span><button data-act="ml-step" data-key="' + key + '" data-dir="1" aria-label="More servings">+</button></div></div>' +
-        '<div class="muted small num">' + (a.servings > 0 ? Math.round(m.cal) + ' cal · P ' + m.p.toFixed(0) + 'g · C ' + m.c.toFixed(0) + 'g · F ' + m.f.toFixed(0) + 'g' : 'Not eating this') + '</div><div style="margin-top:8px">';
-      r.ingredients.forEach((ing, idx) => {
-        const food = slotFood(r, a, idx), g = slotGrams(r, a, idx), swapped = a.swaps && a.swaps[idx];
-        h += '<div class="ing"><span>' + esc(food ? food.n : 'Unknown') + (swapped ? ' <span class="muted small">(swapped)</span>' : '') + '</span><span class="g num">' + (g > 0 ? Math.round(g) + ' g' : '–') + '</span></div>' +
-          '<div class="swaprow">' + (swapped ? '<button class="sm" data-act="ml-revert" data-key="' + key + '" data-idx="' + idx + '">Undo</button>' : '') +
-          '<select data-chg="ml-swap" data-key="' + key + '" data-idx="' + idx + '" aria-label="Swap ' + esc(food ? food.n : 'ingredient') + '"><option value="">Swap</option>' + foodOptions('', false) + '</select></div>';
-      });
-      h += '</div>';
+function pickSheet(){
+  const pk = UI.ml.pick, key = pk.day + '-' + pk.slot, a = S.meals.plan[key], cur = a && a.recipeId && recipes.find(x => x.id === a.recipeId);
+  let h = '<div class="sheet-back" data-act="ml-pkclose"><div class="sheet" data-stop="1" role="dialog" aria-label="Pick a recipe"><div class="lbl-row" style="margin-bottom:10px"><h3 style="margin:0">' + WEEKDAYS[pk.day] + ' · ' + pk.slot + '</h3><button class="sm" data-act="ml-pkclose">Done</button></div>';
+  if(cur){
+    const m = slotMacros(cur, a);
+    const eaten = isEaten(a), ed = weekDate(pk.day), q = parse(ed);
+    h += '<div class="card" style="background:var(--surface-2)"><div class="lbl-row"><b>' + esc(cur.name) + '</b><button class="danger" data-act="ml-remove" aria-label="Remove recipe">Remove</button></div>';
+    if(eaten){
+      h += '<div class="muted small num">' + Math.round(m.cal) + ' cal · ' + a.servings + ' serving(s)</div><div class="good" style="margin-top:8px;font-weight:600">✓ Logged as eaten on ' + DOW[dow(ed)] + ' ' + q.d + ' ' + MONTHS[q.m - 1].slice(0, 3) + '</div><button class="btn ghost" data-act="ml-uneat">Undo</button>';
+    }else{
+      h += '<div class="stepper" style="padding-bottom:0"><span class="muted num">' + Math.round(m.cal) + ' cal · P ' + n1(m.p) + ' · C ' + n1(m.c) + ' · F ' + n1(m.f) + '</span><div class="ctl"><button data-act="ml-step" data-dir="-1" aria-label="Fewer servings">−</button><span class="v num">' + a.servings + '</span><button data-act="ml-step" data-dir="1" aria-label="More servings">+</button></div></div>' +
+        '<button class="btn sage" data-act="ml-eat">Mark as eaten (adds to ' + DOW[dow(ed)] + ' ' + q.d + ' ' + MONTHS[q.m - 1].slice(0, 3) + ' log)</button>';
     }
     h += '</div>';
-  });
+  }
+  h += '<input type="text" placeholder="Search recipes by name" value="' + esc(pk.q) + '" data-inp="ml-pq" aria-label="Search recipes" autocomplete="off"><div style="margin-top:8px">' + tabs('ml-pf', [['all', 'All']].concat(TYPES), pk.f) + '</div><div id="pkList"></div></div></div>';
   return h;
 }
+function updatePickList(){
+  const el = $('#pkList'), pk = UI.ml.pick;
+  if(!el || !pk) return;
+  const rs = searchRecipes(pk.q, pk.f);
+  el.innerHTML = !recipes.length ? '<div class="empty" style="margin-top:8px">No recipes yet. Add some in the Recipes tab.</div>' : !rs.length ? '<div class="empty" style="margin-top:8px">No recipe matches.</div>' :
+    rs.map(r => { const m = recipeMacros(r), per = r.servings || 1; return '<button type="button" class="res" data-act="ml-set" data-id="' + esc(r.id) + '">' + esc(r.name) + '<small class="num">' + esc(TYPE_LABEL[r.type] || r.type) + ' · ' + Math.round(m.cal / per) + ' cal · P ' + n1(m.p / per) + ' per serving</small></button>'; }).join('');
+}
+INP['ml-pq'] = el => { UI.ml.pick.q = el.value; updatePickList(); };
+ACT['ml-cell'] = el => {
+  const slot = el.dataset.slot, type = SLOT_TYPE[slot];
+  UI.ml.pick = {day: +el.dataset.day, slot: slot, q: '', f: recipes.some(r => r.type === type) ? type : 'all'};
+  renderMealWeek();
+};
+ACT['ml-pkclose'] = (el, e) => { if(e.target.closest('[data-stop]') && el.classList.contains('sheet-back') && !e.target.classList.contains('sheet-back')) return; UI.ml.pick = null; renderMealWeek(); };
+ACT['ml-pf'] = el => { UI.ml.pick.f = el.dataset.v; renderMealWeek(); };
+ACT['ml-set'] = el => {
+  const pk = UI.ml.pick, r = recipes.find(x => x.id === el.dataset.id);
+  if(!r) return;
+  unlogEaten(S.meals.plan[pk.day + '-' + pk.slot]);
+  S.meals.plan[pk.day + '-' + pk.slot] = {recipeId: r.id, servings: suggestServings(r)};
+  saveDoc('meals', S.meals); renderMealWeek();
+};
+ACT['ml-remove'] = () => { const pk = UI.ml.pick; unlogEaten(S.meals.plan[pk.day + '-' + pk.slot]); delete S.meals.plan[pk.day + '-' + pk.slot]; saveDoc('meals', S.meals); UI.ml.pick = null; renderMealWeek(); };
+ACT['ml-step'] = el => {
+  const pk = UI.ml.pick, a = S.meals.plan[pk.day + '-' + pk.slot];
+  if(!a || isEaten(a)) return;
+  a.servings = Math.max(0.5, (a.servings || 0) + parseFloat(el.dataset.dir) * 0.5);
+  saveDoc('meals', S.meals); renderMealWeek();
+};
 
-/* ----- groceries ----- */
+/* ---------- groceries (from the weekly table) ---------- */
 function groceryTotals(){
   const totals = {};
   Object.keys(S.meals.plan).forEach(key => {
@@ -1138,8 +1307,7 @@ function groceryTotals(){
     const r = recipes.find(x => x.id === a.recipeId);
     if(!r) return;
     r.ingredients.forEach((ing, idx) => {
-      const sw = a.swaps && a.swaps[idx];
-      const k = sw ? sw.key : (ing.key === '__custom__' ? 'custom::' + (ing.customName || 'Custom food') : ing.key);
+      const k = ing.key === '__custom__' ? 'custom::' + (ing.customName || 'Custom food') : ing.key;
       const g = slotGrams(r, a, idx);
       if(g > 0) totals[k] = (totals[k] || 0) + g;
     });
@@ -1150,10 +1318,10 @@ function groceryName(k){ if(k.indexOf('custom::') === 0) return k.slice(8); cons
 function renderGroceries(){
   const totals = groceryTotals(), keys = Object.keys(totals), wrap = $('#ml-groc');
   const groups = {protein:'Protein', carb:'Carbs', fat:'Fats & pantry', veg:'Vegetables', custom:'Other'};
-  let h = '<div class="card"><h3>This week\'s shopping list</h3><p class="muted small" style="margin-top:0">Built from your weekly plan and your servings. Tick items as you pick them up.</p>';
+  let h = '<div class="card"><h3>This week\'s shopping list</h3><p class="muted small" style="margin-top:0">Built from your weekly table and its servings. Tick items as you pick them up.</p>';
   if(!keys.length){
-    h += '<div class="empty">Add recipes to your weekly plan and the list builds itself.</div></div>';
-    wrap.innerHTML = h; return;
+    wrap.innerHTML = h + '<div class="empty">Add recipes to the weekly table and the list builds itself.</div></div>';
+    return;
   }
   h += '<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="sm" data-act="gr-copy">Copy list</button><button class="sm" data-act="gr-clear">Clear ticks</button></div>';
   Object.keys(groups).forEach(cat => {
@@ -1165,70 +1333,20 @@ function renderGroceries(){
       h += '<div class="gitem"><label><input type="checkbox" data-chg="gr-check" data-key="' + esc(k) + '"' + (ck ? ' checked' : '') + '><span style="' + (ck ? 'text-decoration:line-through;color:var(--dim)' : '') + '">' + esc(groceryName(k)) + '</span></label><span class="amt num">' + Math.round(totals[k]) + ' g</span></div>';
     });
   });
-  h += '</div>';
-  wrap.innerHTML = h;
+  wrap.innerHTML = h + '</div>';
 }
 CHG['gr-check'] = el => { S.meals.checked[el.dataset.key] = el.checked; saveDoc('meals', S.meals); renderGroceries(); };
 ACT['gr-clear'] = () => { S.meals.checked = {}; saveDoc('meals', S.meals); renderGroceries(); };
 ACT['gr-copy'] = () => {
   const totals = groceryTotals();
   const lines = Object.keys(totals).filter(k => !S.meals.checked[k]).map(k => '- ' + groceryName(k) + ': ' + Math.round(totals[k]) + ' g');
-  const text = 'Groceries\n' + lines.join('\n');
-  try{ navigator.clipboard.writeText(text).then(() => toast('List copied'), () => toast('Could not copy')); }
+  try{ navigator.clipboard.writeText('Groceries\n' + lines.join('\n')).then(() => toast('List copied'), () => toast('Could not copy')); }
   catch(e){ toast('Could not copy'); }
 };
 
 /* =====================================================================
-   RECIPE LIBRARY (shared) — add, edit, link/text auto-fill, swaps
+   RECIPE LIBRARY (shared)
    ===================================================================== */
-const UNIT_GRAMS = {
-  cup:240, cups:240, tbsp:15, tablespoon:15, tablespoons:15,
-  tsp:5, teaspoon:5, teaspoons:5, oz:28.35, ounce:28.35, ounces:28.35,
-  lb:453.6, lbs:453.6, pound:453.6, pounds:453.6,
-  g:1, gram:1, grams:1, kg:1000, kilogram:1000,
-  ml:1, milliliter:1, milliliters:1, l:1000, liter:1000, liters:1000,
-  clove:5, cloves:5, slice:30, slices:30, piece:50, pieces:50,
-  can:400, cans:400, pinch:0.5, dash:0.5
-};
-const UNICODE_FRACTIONS = {'½':0.5,'⅓':1/3,'⅔':2/3,'¼':0.25,'¾':0.75,'⅕':0.2,'⅖':0.4,'⅗':0.6,'⅘':0.8,'⅙':1/6,'⅚':5/6,'⅛':0.125,'⅜':0.375,'⅝':0.625,'⅞':0.875};
-function normalizeFractions(str){
-  return str.replace(/(\d+)\s*([½⅓⅔¼¾⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞])/g, (m, whole, frac) => (parseInt(whole, 10) + UNICODE_FRACTIONS[frac]).toString())
-            .replace(/[½⅓⅔¼¾⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞]/g, m => UNICODE_FRACTIONS[m].toString());
-}
-function cleanIngredientLine(line){ return line.trim().replace(/^[\*\-•]\s*/, '').replace(/^\d+\.\s*/, ''); }
-function isHeaderLine(line){ return /^(for\b|optional|method|ingredients?\b|directions?|instructions?)/i.test(line) || /:$/.test(line.trim()); }
-function guessIngredientFromText(rawText){
-  let text = normalizeFractions(cleanIngredientLine(rawText));
-  const rangeNorm = text.toLowerCase().replace(/–|—/g, '-');
-  const rangeMatch = rangeNorm.match(/^(\d+(\.\d+)?)\s*(-|to)\s*(\d+(\.\d+)?)/);
-  let qty = 1, afterQtyIdx = 0;
-  if(rangeMatch){ qty = (parseFloat(rangeMatch[1]) + parseFloat(rangeMatch[4])) / 2; afterQtyIdx = rangeMatch[0].length; }
-  else{
-    const single = rangeNorm.match(/^(\d+(\.\d+)?)/);
-    if(single){ qty = parseFloat(single[1]); afterQtyIdx = single[0].length; }
-  }
-  let rest = rangeNorm.slice(afterQtyIdx).trim();
-  let unit = null;
-  if(afterQtyIdx > 0){
-    const words = rest.split(/\s+/).slice(0, 3);
-    for(const w of words){
-      const clean = w.replace(/[^a-z]/g, '');
-      if(UNIT_GRAMS[clean]){ unit = clean; break; }
-    }
-    if(unit){ const i = rest.indexOf(unit); rest = (rest.slice(0, i) + rest.slice(i + unit.length)).trim(); }
-  }
-  rest = rest.replace(/\(.*?\)/g, '').replace(/^(of|,)\s*/, '').replace(/,?\s*(to taste|as needed|for garnish|for serving|optional)\.?$/i, '').trim();
-  const grams = unit ? Math.round(qty * UNIT_GRAMS[unit]) : Math.round(qty * 100);
-  let best = null, bestLen = 0;
-  allFoodsFlat().forEach(f => {
-    const fname = f.n.toLowerCase().split(',')[0];
-    if(rest.indexOf(fname) >= 0 && fname.length > bestLen){ best = f; bestLen = fname.length; }
-  });
-  if(best) return {key: best.key, grams: grams || 100};
-  const label = rest ? rest.charAt(0).toUpperCase() + rest.slice(1) : text;
-  return {key:'__custom__', customName: label, customCal:0, customP:0, customC:0, customF:0, grams: grams || 100};
-}
-
 let formState = {ingredients:[{key:'protein::Chicken breast, cooked', grams:150}]};
 let editingId = null;
 function renderRecipeIngRows(container, ingredients){
@@ -1307,41 +1425,16 @@ function openRecipeForm(recipe){
   $('#rType').value = recipe ? recipe.type : 'breakfast';
   $('#rServings').value = recipe ? recipe.servings : 1;
   $('#rMethod').value = recipe ? (recipe.method || '') : '';
-  $('#rLink').value = ''; $('#rPasteText').value = ''; $('#fetchStatus').textContent = ''; $('#parseTextStatus').textContent = '';
   refreshRecipeForm();
   $('#newRecipeForm').scrollIntoView({behavior:'smooth'});
 }
 function bindRecipeForm(){
+  $('#rType').innerHTML = TYPES.map(t => '<option value="' + t[0] + '">' + t[1] + '</option>').join('');
   $('#addRecipeBtn').addEventListener('click', () => openRecipeForm(null));
   $('#cancelRecipe').addEventListener('click', () => { editingId = null; $('#newRecipeForm').hidden = true; });
   $('#addIngRow').addEventListener('click', () => { formState.ingredients.push({key:'veg::Broccoli, cooked', grams:100}); refreshRecipeForm(); });
   $('#rServings').addEventListener('input', updateMacroPreview);
   $('#recipeSearch').addEventListener('input', renderRecipeList);
-  $('#fetchRecipeBtn').addEventListener('click', async () => {
-    const link = $('#rLink').value.trim(), status = $('#fetchStatus');
-    if(!link){ status.textContent = 'Paste a recipe link first.'; return; }
-    status.textContent = 'Fetching…';
-    try{
-      const res = await fetch('/api/parse-recipe?url=' + encodeURIComponent(link));
-      const data = await res.json();
-      if(!res.ok || data.error){ status.textContent = data.error || 'Could not read that page.'; return; }
-      if(data.name) $('#rName').value = data.name;
-      if(data.servings){ const num = String(data.servings).match(/\d+/); if(num) $('#rServings').value = num[0]; }
-      if(Array.isArray(data.ingredients) && data.ingredients.length){
-        formState.ingredients = data.ingredients.map(guessIngredientFromText);
-        refreshRecipeForm();
-        status.textContent = 'Filled in. Check each ingredient match, its grams, and the macros before saving.';
-      }else{ status.textContent = 'Found the page but no ingredient list. Add ingredients manually.'; }
-    }catch(e){ status.textContent = 'Link import needs the recipe-reading service. You can paste the ingredient text below instead.'; }
-  });
-  $('#parseTextBtn').addEventListener('click', () => {
-    const lines = $('#rPasteText').value.split('\n').map(cleanIngredientLine).filter(l => l && !isHeaderLine(l));
-    const status = $('#parseTextStatus');
-    if(!lines.length){ status.textContent = 'Paste some ingredient lines first, one per line.'; return; }
-    formState.ingredients = lines.map(guessIngredientFromText);
-    refreshRecipeForm();
-    status.textContent = 'Parsed. Check each ingredient match, its grams, and the macros before saving.';
-  });
   $('#saveRecipe').addEventListener('click', async () => {
     const name = $('#rName').value.trim();
     if(!name || !formState.ingredients.length){ toast('Give it a name and at least one ingredient'); return; }
@@ -1356,12 +1449,14 @@ function bindRecipeForm(){
     editingId = null; $('#newRecipeForm').hidden = true; toast('Recipe saved');
   });
 }
+ACT['ml-rf'] = el => { UI.ml.rf = el.dataset.v; renderRecipeList(); };
 function renderRecipeList(){
   const wrap = $('#recipeList');
-  const query = ($('#recipeSearch').value || '').trim().toLowerCase();
-  const filtered = query ? recipes.filter(r => r.name.toLowerCase().indexOf(query) >= 0) : recipes;
+  const rf = UI.ml.rf || 'all';
+  $('#recipeFilter').innerHTML = tabs('ml-rf', [['all', 'All']].concat(TYPES), rf);
+  const filtered = searchRecipes($('#recipeSearch').value || '', rf);
   if(!recipes.length){ wrap.innerHTML = '<div class="empty">No recipes yet. Add your first one above.</div>'; return; }
-  if(!filtered.length){ wrap.innerHTML = '<div class="empty">No recipes match "' + esc(query) + '".</div>'; return; }
+  if(!filtered.length){ wrap.innerHTML = '<div class="empty">No recipes match.</div>'; return; }
   wrap.innerHTML = '';
   filtered.forEach(r => {
     const m = recipeMacros(r), per = r.servings || 1;
@@ -1370,7 +1465,7 @@ function renderRecipeList(){
     const ingLines = r.ingredients.map(ing => { const f = ingredientFood(ing); return '<div class="ing"><span>' + esc(f ? f.n : 'Unknown') + '</span><span class="g num">' + Math.round(ing.grams) + ' g</span></div>'; }).join('');
     card.innerHTML =
       '<div class="recipe-title"><span data-view="' + esc(r.id) + '" style="cursor:pointer;flex:1">' + esc(r.name) + '</span><span><button class="sm" data-edit="' + esc(r.id) + '">Edit</button> <button class="danger" data-del="' + esc(r.id) + '" aria-label="Delete recipe">✕</button></span></div>' +
-      '<div class="muted small" data-view="' + esc(r.id) + '" style="cursor:pointer">' + esc(r.type) + ' · ' + r.servings + ' serving(s) · tap to view</div>' +
+      '<div class="muted small" data-view="' + esc(r.id) + '" style="cursor:pointer">' + esc(TYPE_LABEL[r.type] || r.type) + ' · ' + r.servings + ' serving(s) · tap to view</div>' +
       '<div class="macro-mini num"><span><b>' + Math.round(m.cal / per) + '</b> cal/serving</span><span>P <b>' + (m.p / per).toFixed(0) + 'g</b></span><span>C <b>' + (m.c / per).toFixed(0) + 'g</b></span><span>F <b>' + (m.f / per).toFixed(0) + 'g</b></span></div>' +
       '<div id="detail-' + esc(r.id) + '" hidden style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line)"><div class="muted small">Ingredients for ' + r.servings + ' serving(s)</div>' + ingLines +
       (r.method ? '<div class="muted small" style="margin:12px 0 4px">Method</div><div style="white-space:pre-line;line-height:1.6">' + esc(r.method) + '</div>' : '<p class="muted small">No method saved for this recipe.</p>') + '</div>';
@@ -1378,7 +1473,7 @@ function renderRecipeList(){
   });
   $$('[data-view]', wrap).forEach(el => el.addEventListener('click', () => { const d = document.getElementById('detail-' + el.dataset.view); if(d) d.hidden = !d.hidden; }));
   $$('[data-del]', wrap).forEach(btn => btn.addEventListener('click', async () => {
-    if(!confirm('Remove this recipe for both of you?')) return;
+    if(!sure('rdel' + btn.dataset.del, 'Delete this recipe for both of you?')) return;
     try{ await recipesCol.doc(btn.dataset.del).delete(); }catch(e){ toast('Could not remove it. Check your connection.'); }
   }));
   $$('[data-edit]', wrap).forEach(btn => btn.addEventListener('click', () => { const r = recipes.find(x => x.id === btn.dataset.edit); if(r) openRecipeForm(r); }));
@@ -1388,11 +1483,28 @@ function initRecipes(){
   recipesCol.orderBy('updatedAt', 'desc').onSnapshot(snap => {
     recipes = snap.docs.map(d => Object.assign({id: d.id}, d.data()));
     if(!P || !S.meals || sec !== 'meals') return;
-    if(UI.ml.sub === 'recipes') renderRecipeList();
-    else if(UI.ml.sub === 'week') renderMealWeek();
-    else renderGroceries();
+    const s = UI.ml.sub;
+    if(s === 'recipes') renderRecipeList();
+    else if(s === 'week'){ if(UI.ml.pick) updatePickList(); else renderMealWeek(); }
+    else if(s === 'groceries') renderGroceries();
+    else updateResults();
   }, err => { console.error('Recipe sync error', err); });
 }
+
+ACT['ml-eat'] = () => {
+  const pk = UI.ml.pick, key = pk.day + '-' + pk.slot, a = S.meals.plan[key];
+  const r = a && recipes.find(x => x.id === a.recipeId);
+  if(!r || isEaten(a)) return;
+  const m = slotMacros(r, a), date = weekDate(pk.day), id = 'e' + Date.now();
+  (S.meals.log[date] || (S.meals.log[date] = [])).push({id:id, name:r.name, desc:a.servings + (a.servings === 1 ? ' serving' : ' servings'), cal:Math.round(m.cal * 10) / 10, p:Math.round(m.p * 10) / 10, c:Math.round(m.c * 10) / 10, f:Math.round(m.f * 10) / 10});
+  a.eaten = {id:id, date:date};
+  saveDoc('meals', S.meals); toast('Added to your log'); renderMealWeek();
+};
+ACT['ml-uneat'] = () => {
+  const pk = UI.ml.pick, a = S.meals.plan[pk.day + '-' + pk.slot];
+  unlogEaten(a);
+  saveDoc('meals', S.meals); renderMealWeek();
+};
 
 /* =====================================================================
    ROUTINE TRACKER — editable per profile
@@ -1547,7 +1659,9 @@ function renderRoutine(scrollNow){
       '<button class="iconbtn" data-act="rt-next" aria-label="Next"><svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></button><button class="sm" data-act="rt-today" style="height:42px">Today</button></div>';
   }
   $('#sec-routine').innerHTML = h + body;
-  if(scrollNow && ui.view === 'day'){ const el = $('#sec-routine .row.now'); if(el && el.scrollIntoView) el.scrollIntoView({block:'center'}); }
+  if(scrollNow && ui.view === 'day'){
+    setTimeout(() => { const el = $('#sec-routine .row.now'); if(el && el.scrollIntoView) el.scrollIntoView({block:'center'}); }, 30);
+  }
 }
 RENDER.routine = () => renderRoutine(true);
 
@@ -1594,6 +1708,9 @@ function rtDay(today, nowMin){
   if(isToday) rows.forEach(r => { if(r.t <= nowMin) nowIdx = r.i; });
   let h = '<div class="card"><div class="lbl-row" style="margin:0"><h3 style="margin:0">' + DOWFULL[w] + ' ' + p.d + ' ' + MONTHS[p.m - 1] + '</h3><span class="num muted">' + st.done + ' of ' + st.total + '</span></div>' +
     '<div class="bar" style="margin-top:12px"><i style="width:' + Math.round(st.p * 100) + '%"></i></div></div>';
+  if(isToday && nowCal().key !== today){
+    h += '<div class="hint">It\u2019s after midnight, so you\u2019re still in ' + DOWFULL[w] + '\u2019s routine. ' + DOWFULL[dow(nowCal().key)] + ' starts at 4:00 AM. <button class="sm" style="margin-top:8px;display:block" data-act="rt-cal">Open ' + DOWFULL[dow(nowCal().key)] + '</button></div>';
+  }
   if(future) h += '<div class="hint">This day hasn\u2019t started yet. You can add a note now and tick items on the day.</div>';
   if(!rows.length) h += '<div class="empty">Nothing is scheduled for this day. Add items in the Edit tab.</div>';
   h += '<ol class="timeline">';
@@ -1614,6 +1731,7 @@ function rtDay(today, nowMin){
 
 ACT['rt-view'] = el => { UI.rt.view = el.dataset.v; renderRoutine(true); };
 ACT['rt-goto'] = el => { UI.rt.cur = el.dataset.k; UI.rt.view = 'day'; renderRoutine(true); window.scrollTo(0, 0); };
+ACT['rt-cal'] = () => { UI.rt.cur = nowCal().key; renderRoutine(false); window.scrollTo(0, 0); };
 ACT['rt-today'] = () => { UI.rt.cur = nowInfo().key; renderRoutine(true); };
 function shiftMonth(k, n){ const p = parse(k), t = p.m - 1 + n, y = p.y + Math.floor(t / 12), m = ((t % 12) + 12) % 12 + 1; return mk(y, m, Math.min(p.d, daysIn(y, m))); }
 function rtStep(s){
@@ -1708,12 +1826,12 @@ ACT['rt-add'] = () => {
   UI.rt.edit = id; rtChanged();
 };
 ACT['rt-del'] = el => {
-  if(!confirm('Delete this item from your routine?')) return;
+  if(!sure('rt-del' + el.dataset.id, 'Delete this item?')) return;
   S.routine.items = S.routine.items.filter(i => i.id !== el.dataset.id);
   UI.rt.edit = null; rtChanged();
 };
 ACT['rt-reset'] = () => {
-  if(!confirm('Replace your routine with the starter routine? Your past ticks stay.')) return;
+  if(!sure('rt-reset', 'Reset to the starter routine?')) return;
   S.routine.items = defaultRoutine(P); UI.rt.edit = null; rtChanged();
 };
 
@@ -1973,7 +2091,7 @@ ACT['mn-catadd'] = () => {
   saveDoc('moneyset', S.moneyset); renderMoney();
 };
 ACT['mn-catdel'] = el => {
-  if(!confirm('Remove "' + el.dataset.n + '"? Past transactions keep their category name.')) return;
+  if(!sure('cat' + el.dataset.n, 'Remove ' + el.dataset.n + '?')) return;
   S.moneyset.exp = S.moneyset.exp.filter(c => c.n !== el.dataset.n);
   saveDoc('moneyset', S.moneyset); renderMoney(); renderNav();
 };
