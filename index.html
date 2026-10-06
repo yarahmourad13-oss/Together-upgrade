@@ -123,8 +123,6 @@ input[type=checkbox]{width:18px;height:18px;accent-color:var(--amber)}
 .stepper span.v{min-width:34px;text-align:center;font-weight:600}
 .ing{display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:14px}
 .ing .g{color:var(--amber);font-weight:600;white-space:nowrap}
-.swaprow{display:flex;gap:6px;justify-content:flex-end;margin-bottom:4px}
-.swaprow select{width:auto;max-width:150px;font-size:13px;padding:6px}
 .macro-mini{display:flex;gap:12px;flex-wrap:wrap;font-size:13px;color:var(--dim);margin-top:6px}
 .macro-mini b{color:var(--text)}
 .recipe-card{border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px;background:var(--surface-2)}
@@ -138,6 +136,10 @@ input[type=checkbox]{width:18px;height:18px;accent-color:var(--amber)}
 .gitem .amt{color:var(--amber);font-weight:600;white-space:nowrap}
 .cellbtn{width:100%;text-align:left;padding:6px 4px;border-radius:8px;font-size:12.5px;line-height:1.25;min-width:84px}
 .cellbtn small{display:block;color:var(--dim)}
+.sheet-back{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center}
+.sheet{background:var(--surface);border:1px solid var(--line);border-radius:18px 18px 0 0;width:100%;max-width:640px;max-height:84vh;overflow:auto;padding:16px 16px calc(20px + env(safe-area-inset-bottom,0px))}
+.res{display:block;width:100%;text-align:left;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--surface-2);margin-top:6px;font-weight:500}
+.res small{display:block;color:var(--dim);font-weight:400;font-size:12.5px;margin-top:1px}
 
 /* routine */
 .bigline{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
@@ -211,11 +213,6 @@ input[type=checkbox]{width:18px;height:18px;accent-color:var(--amber)}
 .stat .v{font-family:'Fraunces',Georgia,serif;font-weight:600;font-size:18px;line-height:1.2;margin-top:2px;word-break:break-word}
 .catrow{margin-bottom:14px}
 .catrow:last-child{margin-bottom:0}
-
-.sheet-back{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center}
-.sheet{background:var(--surface);border:1px solid var(--line);border-radius:18px 18px 0 0;width:100%;max-width:640px;max-height:84vh;overflow:auto;padding:16px 16px calc(20px + env(safe-area-inset-bottom,0px))}
-.res{display:block;width:100%;text-align:left;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--surface-2);margin-top:6px;font-weight:500}
-.res small{display:block;color:var(--dim);font-weight:400;font-size:12.5px;margin-top:1px}
 </style>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
@@ -255,6 +252,10 @@ input[type=checkbox]{width:18px;height:18px;accent-color:var(--amber)}
             <h3 id="rFormTitle">New recipe</h3>
             <label class="field" for="rName">Recipe name</label>
             <input type="text" id="rName" placeholder="e.g. Chicken and rice bowl">
+            <label class="field" for="rPasteText">Paste an ingredient list (from a screenshot, DM, or caption)</label>
+            <textarea id="rPasteText" rows="5" placeholder="2 thick slices sourdough bread&#10;1 ripe avocado&#10;150-200 g halloumi cheese&#10;\u00bd lemon"></textarea>
+            <button class="btn ghost" id="parseTextBtn" type="button">Parse this text</button>
+            <p class="muted small" id="parseTextStatus"></p>
             <label class="field" for="rType">Meal type</label>
             <select id="rType"></select>
             <label class="field" for="rServings">Base servings</label>
@@ -456,16 +457,16 @@ document.addEventListener('click', e => {
   const f = ACT[el.dataset.act];
   if(f) f(el, e);
 });
-document.addEventListener('input', e => {
-  const el = e.target.closest('[data-inp]');
-  if(!el) return;
-  const f = INP[el.dataset.inp];
-  if(f) f(el, e);
-});
 document.addEventListener('change', e => {
   const el = e.target.closest('[data-chg]');
   if(!el) return;
   const f = CHG[el.dataset.chg];
+  if(f) f(el, e);
+});
+document.addEventListener('input', e => {
+  const el = e.target.closest('[data-inp]');
+  if(!el) return;
+  const f = INP[el.dataset.inp];
   if(f) f(el, e);
 });
 
@@ -963,6 +964,17 @@ function defMeals(){ return {plan:{}, prev:null, checked:{}, targets:null, log:{
 function newAdd(){ return {mode:'food', q:'', key:'', unit:'g', qty:'', pw:'', rq:'', rkey:'', srv:'1', custom:false}; }
 function mealTargets(){ return S.meals.targets || PROFILES[P].targets; }
 function n1(x){ return x < 10 ? (Math.round(x * 10) / 10).toString() : Math.round(x).toString(); }
+function weekDate(dayIdx){ return addDays(mondayOf(todayKey()), dayIdx); }
+function isEaten(a){ return !!(a && a.eaten && (S.meals.log[a.eaten.date] || []).some(e => e.id === a.eaten.id)); }
+function unlogEaten(a){
+  if(!a || !a.eaten) return;
+  const dt = a.eaten.date;
+  if(S.meals.log[dt]){
+    S.meals.log[dt] = S.meals.log[dt].filter(e => e.id !== a.eaten.id);
+    if(!S.meals.log[dt].length) delete S.meals.log[dt];
+  }
+  delete a.eaten;
+}
 
 function recipeMacros(recipe){
   let cal = 0, p = 0, c = 0, f = 0;
@@ -984,17 +996,6 @@ function suggestServings(recipe){
   if(calPer <= 0) return 1;
   const s = Math.round((mealTargets().cal / 4 / calPer) * 2) / 2;
   return s < 0.5 ? 0.5 : s;
-}
-function weekDate(dayIdx){ return addDays(mondayOf(todayKey()), dayIdx); }
-function isEaten(a){ return !!(a && a.eaten && (S.meals.log[a.eaten.date] || []).some(e => e.id === a.eaten.id)); }
-function unlogEaten(a){
-  if(!a || !a.eaten) return;
-  const dt = a.eaten.date;
-  if(S.meals.log[dt]){
-    S.meals.log[dt] = S.meals.log[dt].filter(e => e.id !== a.eaten.id);
-    if(!S.meals.log[dt].length) delete S.meals.log[dt];
-  }
-  delete a.eaten;
 }
 function dayTotals(d){
   let cal = 0, p = 0, c = 0, f = 0;
@@ -1055,7 +1056,7 @@ function foodFromKey(k){
 }
 function searchRecipes(q, type){
   const w = q.toLowerCase().split(/\s+/).filter(Boolean);
-  return recipes.filter(r => (type === 'all' || !type || r.type === type) && w.every(x => r.name.toLowerCase().indexOf(x) >= 0)).sort((a, b) => a.name.localeCompare(b.name));
+  return recipes.filter(r => (type === 'all' || !type || r.type === type) && w.every(x => (r.name || '').toLowerCase().indexOf(x) >= 0)).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 }
 function addCalc(){
   const a = UI.ml.add;
@@ -1229,6 +1230,15 @@ ACT['ml-new'] = () => {
   S.meals.plan = {}; S.meals.checked = {};
   saveDoc('meals', S.meals); renderMealWeek();
 };
+CHG['ml-recipe'] = el => {
+  const key = el.dataset.key;
+  if(!el.value){ delete S.meals.plan[key]; }
+  else{
+    const r = recipes.find(x => x.id === el.value);
+    S.meals.plan[key] = {recipeId: el.value, servings: r ? suggestServings(r) : 1};
+  }
+  saveDoc('meals', S.meals); renderMealWeek();
+};
 function renderMealWeek(){
   const ui = UI.ml, t = mealTargets();
   let h = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px"><button class="sm" data-act="ml-repeat">Repeat last week</button><button class="sm" data-act="ml-new">Start new week</button><button class="sm" data-act="ml-tg">' + (ui.tg ? 'Hide targets' : 'Edit daily targets') + '</button></div>';
@@ -1297,6 +1307,20 @@ ACT['ml-step'] = el => {
   a.servings = Math.max(0.5, (a.servings || 0) + parseFloat(el.dataset.dir) * 0.5);
   saveDoc('meals', S.meals); renderMealWeek();
 };
+ACT['ml-eat'] = () => {
+  const pk = UI.ml.pick, key = pk.day + '-' + pk.slot, a = S.meals.plan[key];
+  const r = a && recipes.find(x => x.id === a.recipeId);
+  if(!r || isEaten(a)) return;
+  const m = slotMacros(r, a), date = weekDate(pk.day), id = 'e' + Date.now();
+  (S.meals.log[date] || (S.meals.log[date] = [])).push({id:id, name:r.name, desc:a.servings + (a.servings === 1 ? ' serving' : ' servings'), cal:Math.round(m.cal * 10) / 10, p:Math.round(m.p * 10) / 10, c:Math.round(m.c * 10) / 10, f:Math.round(m.f * 10) / 10});
+  a.eaten = {id:id, date:date};
+  saveDoc('meals', S.meals); toast('Added to your log'); renderMealWeek();
+};
+ACT['ml-uneat'] = () => {
+  const pk = UI.ml.pick, a = S.meals.plan[pk.day + '-' + pk.slot];
+  unlogEaten(a);
+  saveDoc('meals', S.meals); renderMealWeek();
+};
 
 /* ---------- groceries (from the weekly table) ---------- */
 function groceryTotals(){
@@ -1343,6 +1367,56 @@ ACT['gr-copy'] = () => {
   try{ navigator.clipboard.writeText('Groceries\n' + lines.join('\n')).then(() => toast('List copied'), () => toast('Could not copy')); }
   catch(e){ toast('Could not copy'); }
 };
+
+/* ---------- ingredient-list text parsing ---------- */
+const UNIT_GRAMS = {
+  cup:240, cups:240, tbsp:15, tablespoon:15, tablespoons:15,
+  tsp:5, teaspoon:5, teaspoons:5, oz:28.35, ounce:28.35, ounces:28.35,
+  lb:453.6, lbs:453.6, pound:453.6, pounds:453.6,
+  g:1, gram:1, grams:1, kg:1000, kilogram:1000,
+  ml:1, milliliter:1, milliliters:1, l:1000, liter:1000, liters:1000,
+  clove:5, cloves:5, slice:30, slices:30, piece:50, pieces:50,
+  can:400, cans:400, pinch:0.5, dash:0.5
+};
+const UNICODE_FRACTIONS = {'\u00bd':0.5,'\u2153':1/3,'\u2154':2/3,'\u00bc':0.25,'\u00be':0.75,'\u2155':0.2,'\u2156':0.4,'\u2157':0.6,'\u2158':0.8,'\u2159':1/6,'\u215a':5/6,'\u215b':0.125,'\u215c':0.375,'\u215d':0.625,'\u215e':0.875};
+function normalizeFractions(str){
+  const frRe = /[\u00bd\u2153\u2154\u00bc\u00be\u2155\u2156\u2157\u2158\u2159\u215a\u215b\u215c\u215d\u215e]/g;
+  return str.replace(new RegExp('(\\d+)\\s*(' + frRe.source + ')', 'g'), (m, whole, frac) => (parseInt(whole, 10) + UNICODE_FRACTIONS[frac]).toString())
+            .replace(frRe, m => UNICODE_FRACTIONS[m].toString());
+}
+function cleanIngredientLine(line){ return line.trim().replace(/^[\*\-\u2022]\s*/, '').replace(/^\d+\.\s*/, ''); }
+function isHeaderLine(line){ return /^(for\b|optional|method|ingredients?\b|directions?|instructions?)/i.test(line) || /:$/.test(line.trim()); }
+function guessIngredientFromText(rawText){
+  let text = normalizeFractions(cleanIngredientLine(rawText));
+  const rangeNorm = text.toLowerCase().replace(/\u2013|\u2014/g, '-');
+  const rangeMatch = rangeNorm.match(/^(\d+(\.\d+)?)\s*(-|to)\s*(\d+(\.\d+)?)/);
+  let qty = 1, afterQtyIdx = 0;
+  if(rangeMatch){ qty = (parseFloat(rangeMatch[1]) + parseFloat(rangeMatch[4])) / 2; afterQtyIdx = rangeMatch[0].length; }
+  else{
+    const single = rangeNorm.match(/^(\d+(\.\d+)?)/);
+    if(single){ qty = parseFloat(single[1]); afterQtyIdx = single[0].length; }
+  }
+  let rest = rangeNorm.slice(afterQtyIdx).trim();
+  let unit = null;
+  if(afterQtyIdx > 0){
+    const words = rest.split(/\s+/).slice(0, 3);
+    for(const w of words){
+      const clean = w.replace(/[^a-z]/g, '');
+      if(UNIT_GRAMS[clean]){ unit = clean; break; }
+    }
+    if(unit){ const i = rest.indexOf(unit); rest = (rest.slice(0, i) + rest.slice(i + unit.length)).trim(); }
+  }
+  rest = rest.replace(/\(.*?\)/g, '').replace(/^(of|,)\s*/, '').replace(/,?\s*(to taste|as needed|for garnish|for serving|optional)\.?$/i, '').trim();
+  const grams = unit ? Math.round(qty * UNIT_GRAMS[unit]) : Math.round(qty * 100);
+  let best = null, bestLen = 0;
+  allFoodsFlat().forEach(f => {
+    const fname = f.n.toLowerCase().split(',')[0];
+    if(rest.indexOf(fname) >= 0 && fname.length > bestLen){ best = f; bestLen = fname.length; }
+  });
+  if(best) return {key: best.key, grams: grams || 100};
+  const label = rest ? rest.charAt(0).toUpperCase() + rest.slice(1) : text;
+  return {key:'__custom__', customName: label, customCal:0, customP:0, customC:0, customF:0, grams: grams || 100};
+}
 
 /* =====================================================================
    RECIPE LIBRARY (shared)
@@ -1425,6 +1499,7 @@ function openRecipeForm(recipe){
   $('#rType').value = recipe ? recipe.type : 'breakfast';
   $('#rServings').value = recipe ? recipe.servings : 1;
   $('#rMethod').value = recipe ? (recipe.method || '') : '';
+  $('#rPasteText').value = ''; $('#parseTextStatus').textContent = '';
   refreshRecipeForm();
   $('#newRecipeForm').scrollIntoView({behavior:'smooth'});
 }
@@ -1435,6 +1510,14 @@ function bindRecipeForm(){
   $('#addIngRow').addEventListener('click', () => { formState.ingredients.push({key:'veg::Broccoli, cooked', grams:100}); refreshRecipeForm(); });
   $('#rServings').addEventListener('input', updateMacroPreview);
   $('#recipeSearch').addEventListener('input', renderRecipeList);
+  $('#parseTextBtn').addEventListener('click', () => {
+    const lines = $('#rPasteText').value.split('\n').map(cleanIngredientLine).filter(l => l && !isHeaderLine(l));
+    const status = $('#parseTextStatus');
+    if(!lines.length){ status.textContent = 'Paste some ingredient lines first, one per line.'; return; }
+    formState.ingredients = lines.map(guessIngredientFromText);
+    refreshRecipeForm();
+    status.textContent = 'Parsed. Check each ingredient match, its grams, and the macros before saving.';
+  });
   $('#saveRecipe').addEventListener('click', async () => {
     const name = $('#rName').value.trim();
     if(!name || !formState.ingredients.length){ toast('Give it a name and at least one ingredient'); return; }
@@ -1464,7 +1547,7 @@ function renderRecipeList(){
     card.className = 'recipe-card';
     const ingLines = r.ingredients.map(ing => { const f = ingredientFood(ing); return '<div class="ing"><span>' + esc(f ? f.n : 'Unknown') + '</span><span class="g num">' + Math.round(ing.grams) + ' g</span></div>'; }).join('');
     card.innerHTML =
-      '<div class="recipe-title"><span data-view="' + esc(r.id) + '" style="cursor:pointer;flex:1">' + esc(r.name) + '</span><span><button class="sm" data-edit="' + esc(r.id) + '">Edit</button> <button class="danger" data-del="' + esc(r.id) + '" aria-label="Delete recipe">✕</button></span></div>' +
+      '<div class="recipe-title"><span data-view="' + esc(r.id) + '" style="cursor:pointer;flex:1">' + esc(r.name || '(untitled recipe)') + '</span><span><button class="sm" data-edit="' + esc(r.id) + '">Edit</button> <button class="danger" data-del="' + esc(r.id) + '" aria-label="Delete recipe">✕</button></span></div>' +
       '<div class="muted small" data-view="' + esc(r.id) + '" style="cursor:pointer">' + esc(TYPE_LABEL[r.type] || r.type) + ' · ' + r.servings + ' serving(s) · tap to view</div>' +
       '<div class="macro-mini num"><span><b>' + Math.round(m.cal / per) + '</b> cal/serving</span><span>P <b>' + (m.p / per).toFixed(0) + 'g</b></span><span>C <b>' + (m.c / per).toFixed(0) + 'g</b></span><span>F <b>' + (m.f / per).toFixed(0) + 'g</b></span></div>' +
       '<div id="detail-' + esc(r.id) + '" hidden style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line)"><div class="muted small">Ingredients for ' + r.servings + ' serving(s)</div>' + ingLines +
@@ -1480,8 +1563,12 @@ function renderRecipeList(){
 }
 function initRecipes(){
   if(!recipesCol) return;
-  recipesCol.orderBy('updatedAt', 'desc').onSnapshot(snap => {
-    recipes = snap.docs.map(d => Object.assign({id: d.id}, d.data()));
+  /* no orderBy here on purpose: Firestore silently excludes any document
+     missing the sort field, which would hide older or hand-edited recipes.
+     Sort client-side instead so every document in the collection shows up. */
+  recipesCol.onSnapshot(snap => {
+    recipes = snap.docs.map(d => Object.assign({id: d.id, name:'', type:'breakfast', servings:1, ingredients:[]}, d.data()))
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
     if(!P || !S.meals || sec !== 'meals') return;
     const s = UI.ml.sub;
     if(s === 'recipes') renderRecipeList();
@@ -1490,21 +1577,6 @@ function initRecipes(){
     else updateResults();
   }, err => { console.error('Recipe sync error', err); });
 }
-
-ACT['ml-eat'] = () => {
-  const pk = UI.ml.pick, key = pk.day + '-' + pk.slot, a = S.meals.plan[key];
-  const r = a && recipes.find(x => x.id === a.recipeId);
-  if(!r || isEaten(a)) return;
-  const m = slotMacros(r, a), date = weekDate(pk.day), id = 'e' + Date.now();
-  (S.meals.log[date] || (S.meals.log[date] = [])).push({id:id, name:r.name, desc:a.servings + (a.servings === 1 ? ' serving' : ' servings'), cal:Math.round(m.cal * 10) / 10, p:Math.round(m.p * 10) / 10, c:Math.round(m.c * 10) / 10, f:Math.round(m.f * 10) / 10});
-  a.eaten = {id:id, date:date};
-  saveDoc('meals', S.meals); toast('Added to your log'); renderMealWeek();
-};
-ACT['ml-uneat'] = () => {
-  const pk = UI.ml.pick, a = S.meals.plan[pk.day + '-' + pk.slot];
-  unlogEaten(a);
-  saveDoc('meals', S.meals); renderMealWeek();
-};
 
 /* =====================================================================
    ROUTINE TRACKER — editable per profile
@@ -1731,8 +1803,8 @@ function rtDay(today, nowMin){
 
 ACT['rt-view'] = el => { UI.rt.view = el.dataset.v; renderRoutine(true); };
 ACT['rt-goto'] = el => { UI.rt.cur = el.dataset.k; UI.rt.view = 'day'; renderRoutine(true); window.scrollTo(0, 0); };
-ACT['rt-cal'] = () => { UI.rt.cur = nowCal().key; renderRoutine(false); window.scrollTo(0, 0); };
 ACT['rt-today'] = () => { UI.rt.cur = nowInfo().key; renderRoutine(true); };
+ACT['rt-cal'] = () => { UI.rt.cur = nowCal().key; renderRoutine(false); window.scrollTo(0, 0); };
 function shiftMonth(k, n){ const p = parse(k), t = p.m - 1 + n, y = p.y + Math.floor(t / 12), m = ((t % 12) + 12) % 12 + 1; return mk(y, m, Math.min(p.d, daysIn(y, m))); }
 function rtStep(s){
   const ui = UI.rt;
